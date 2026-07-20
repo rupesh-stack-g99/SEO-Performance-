@@ -11,31 +11,31 @@ st.subheader("Compare Google Search Console & Google Analytics Data Automaticall
 
 st.markdown("---")
 
-# Helper function to auto-skip Google Analytics metadata rows
 def smart_read_csv(file_buffer):
     """
-    Reads a CSV file, skipping top metadata rows dynamically by scanning 
-    for common header rows or looking for the row with the most columns.
+    Safely reads CSV files exported from GA/GSC by decoding the stream 
+    and dynamically skipping metadata headers before launching Pandas.
     """
-    # Read all lines as plain text first
+    # Read and decode bytes securely
     content = file_buffer.read()
-    # Handle byte streams from zip vs direct uploads
     if isinstance(content, bytes):
-        lines = content.decode('utf-8', errors='ignore').splitlines()
+        text_content = content.decode('utf-8', errors='ignore')
     else:
-        lines = content.splitlines()
+        text_content = content
         
-    # Find the row that actually contains the header
+    lines = text_content.splitlines()
+    
+    # Trace exactly where the actual data grid starts
     skip_rows = 0
-    for idx, line in enumerate(lines[:30]):  # Scan up to the first 30 lines
-        # Look for standard GA/GSC headers
-        if "Page" in line or "Landing page" in line or "Date" in line or "Clicks" in line or "Sessions" in line:
+    for idx, line in enumerate(lines[:50]): # Scan top 50 rows max
+        # Check for standard GA/GSC table headers
+        if any(keyword in line for keyword in ["Page", "Landing page", "Date", "Clicks", "Sessions", "Impressions"]):
             skip_rows = idx
             break
             
-    # Reset pointer and read with pandas using the calculated offset
-    file_buffer.seek(0)
-    return pd.read_csv(file_buffer, skiprows=skip_rows)
+    # Build clean CSV context starting directly at the data table
+    clean_csv_string = "\n".join(lines[skip_rows:])
+    return pd.read_csv(io.StringIO(clean_csv_string))
 
 
 # Sidebar for configuration and uploads
@@ -71,7 +71,6 @@ if gsc_zip_file and ga_csv_file:
             
             if matched_gsc_files:
                 with z.open(matched_gsc_files[0]) as f:
-                    # Use smart reader in case GSC has extra lines too
                     df_gsc = smart_read_csv(f)
                 st.sidebar.success(f"✅ Loaded GSC '{matched_gsc_files[0]}'")
             else:
@@ -83,24 +82,24 @@ if gsc_zip_file and ga_csv_file:
                 else:
                     st.error("❌ No CSV files found inside the GSC ZIP archive.")
 
-        # --- STEP 2: Process GA CSV File using Smart Reader ---
+        # --- STEP 2: Process GA CSV File ---
         df_ga = smart_read_csv(ga_csv_file)
-        st.sidebar.success("✅ Loaded GA CSV data (Metadata skipped!)")
+        st.sidebar.success("✅ Loaded GA CSV data (Metadata successfully bypassed!)")
 
         # --- STEP 3: Merge and Analyze ---
         if df_gsc is not None and df_ga is not None:
-            # Clean column names (strip whitespace)
+            # Clean column headers
             df_gsc.columns = df_gsc.columns.str.strip()
             df_ga.columns = df_ga.columns.str.strip()
             
-            # Map standard variations of Google Analytics "Landing Page" to match GSC's "Page"
+            # Auto-align common variant naming schemas for convenience
             if join_column == "Page":
                 if "Landing page" in df_ga.columns and "Page" not in df_ga.columns:
                     df_ga.rename(columns={"Landing page": "Page"}, inplace=True)
                 elif "Landing page + query string" in df_ga.columns and "Page" not in df_ga.columns:
                     df_ga.rename(columns={"Landing page + query string": "Page"}, inplace=True)
 
-            # Sanitize numeric metrics
+            # Sanitize numeric columns
             for df in [df_gsc, df_ga]:
                 for col in df.columns:
                     if col in ['Clicks', 'Impressions', 'Sessions', 'Conversions', 'Total users']:
@@ -113,9 +112,9 @@ if gsc_zip_file and ga_csv_file:
                 merged_df = pd.merge(df_gsc, df_ga, on=join_column, how="inner")
                 
                 if merged_df.empty:
-                    st.warning(f"⚠️ Merge resulted in 0 rows. Please verify your common column headers. GSC columns: {list(df_gsc.columns)} | GA columns: {list(df_ga.columns)}")
+                    st.warning(f"⚠️ Merge generated 0 matched elements. Verify column keys. GSC keys: {list(df_gsc.columns)} | GA keys: {list(df_ga.columns)}")
                 else:
-                    st.success("🎉 Data successfully merged and cross-referenced!")
+                    st.success("🎉 GSC and GA matrices synchronized!")
                     
                     # --- KPI METRICS ---
                     st.subheader("📊 Quick 3-Month Summary")
@@ -174,9 +173,9 @@ if gsc_zip_file and ga_csv_file:
                         mime="text/csv"
                     )
             else:
-                st.error(f"❌ Matching Column Error: Could not find the column '{join_column}' in one or both files.")
-                st.write("**GSC Columns:**", list(df_gsc.columns))
-                st.write("**GA Columns:**", list(df_ga.columns))
+                st.error(f"❌ Key Parameter Match Failure: Missing column '{join_column}' in datasets.")
+                st.write("**GSC Data Headers:**", list(df_gsc.columns))
+                st.write("**GA Data Headers:**", list(df_ga.columns))
 
     except Exception as e:
         st.error(f"An unexpected error occurred while parsing the data: {e}")
