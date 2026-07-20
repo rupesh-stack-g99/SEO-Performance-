@@ -6,9 +6,9 @@ import io
 import csv
 
 # Set up the Streamlit page
-st.set_page_config(page_title="Overall Project Score Dashboard", layout="wide")
+st.set_page_config(page_title="Single-File Project Score Dashboard", layout="wide")
 st.title("🏆 Website Performance & Project Health Dashboard")
-st.subheader("Compare the Last 3 Months against the Current 3 Months to calculate an Overall Health Score")
+st.subheader("Upload standard comparison exports from GSC & GA to generate an Overall Project Score")
 
 st.markdown("---")
 
@@ -36,131 +36,152 @@ def robust_read_csv(file_buffer):
     df = pd.DataFrame(valid_rows[1:], columns=valid_rows[0])
     return df
 
-def get_metric_sum(df, target_names):
-    """Safely extracts the total sum of a dynamic metric from a dataframe."""
-    for name in target_names:
-        matched_col = [c for c in df.columns if name.lower() in c.lower()]
-        if matched_col:
-            # Clean values
-            series = df[matched_col[0]].astype(str).str.replace(',', '').str.replace('%', '')
-            return pd.to_numeric(series, errors='coerce').fillna(0).sum()
+def clean_and_sum(df, col_name):
+    """Safely converts a target column to float data and returns its total sum."""
+    if col_name in df.columns:
+        series = df[col_name].astype(str).str.replace(',', '').str.replace('%', '')
+        return pd.to_numeric(series, errors='coerce').fillna(0).sum()
     return 0
 
-# Sidebar configuration
-st.sidebar.header("📁 Step 1: Upload Baseline (Previous 3 Months)")
-gsc_zip_prev = st.sidebar.file_uploader("GSC Previous 3M (ZIP)", type=["zip"], key="gsc_prev")
-ga_csv_prev = st.sidebar.file_uploader("GA Previous 3M (CSV)", type=["csv"], key="ga_prev")
+# Sidebar setup for just TWO native comparison files
+st.sidebar.header("📁 Upload Comparison Reports")
+st.sidebar.caption("Generate these by selecting the 'Compare' date range option directly within Google dashboards before exporting.")
 
-st.sidebar.markdown("---")
+gsc_file = st.sidebar.file_uploader("1. GSC Comparison Export (ZIP or CSV)", type=["zip", "csv"])
+ga_file = st.sidebar.file_uploader("2. GA4 Comparison Export (CSV)", type=["csv"])
 
-st.sidebar.header("📁 Step 2: Upload Current (Recent 3 Months)")
-gsc_zip_curr = st.sidebar.file_uploader("GSC Current 3M (ZIP)", type=["zip"], key="gsc_curr")
-ga_csv_curr = st.sidebar.file_uploader("GA Current 3M (CSV)", type=["csv"], key="ga_curr")
-
-st.sidebar.markdown("---")
-gsc_report_type = st.sidebar.selectbox(
-    "Internal GSC File Name Target:",
-    ["Pages.csv", "Dates.csv", "Queries.csv"],
-    index=0
-)
-
-def extract_gsc_df(zip_file, report_name):
-    if zip_file is None: return None
-    with zipfile.ZipFile(zip_file) as z:
-        file_list = z.namelist()
-        matched = [f for f in file_list if report_name.lower() in f.lower()]
-        if matched:
-            with z.open(matched[0]) as f: return robust_read_csv(f)
-        else:
-            csv_files = [f for f in file_list if f.endswith('.csv') and not f.startswith('__MACOSX')]
-            if csv_files:
-                with z.open(csv_files[0]) as f: return robust_read_csv(f)
-    return None
-
-# Check readiness
-if gsc_zip_prev and ga_csv_prev and gsc_zip_curr and ga_csv_curr:
+if gsc_file and ga_file:
     try:
-        # Load all 4 data frames
-        df_gsc_prev = extract_gsc_df(gsc_zip_prev, gsc_report_type)
-        df_gsc_curr = extract_gsc_df(gsc_zip_curr, gsc_report_type)
-        df_ga_prev = robust_read_csv(ga_csv_prev)
-        df_ga_curr = robust_read_csv(ga_csv_curr)
-        
-        # Aggregate Primary Metrics
-        prev_clicks = get_metric_sum(df_gsc_prev, ['clicks'])
-        curr_clicks = get_metric_sum(df_gsc_curr, ['clicks'])
-        
-        prev_impr = get_metric_sum(df_gsc_prev, ['impressions'])
-        curr_impr = get_metric_sum(df_gsc_curr, ['impressions'])
-        
-        prev_sessions = get_metric_sum(df_ga_prev, ['sessions', 'visits'])
-        curr_sessions = get_metric_sum(df_ga_curr, ['sessions', 'visits'])
-        
-        prev_conv = get_metric_sum(df_ga_prev, ['conversions', 'transactions'])
-        curr_conv = get_metric_sum(df_ga_curr, ['conversions', 'transactions'])
+        # --- STEP 1: PARSE GSC COMPARISON FILE ---
+        df_gsc = None
+        if gsc_file.name.endswith('.zip'):
+            with zipfile.ZipFile(gsc_file) as z:
+                # Default to the first valid csv inside the zip (usually Dates or Pages)
+                csv_files = [f for f in z.namelist() if f.endswith('.csv') and not f.startswith('__MACOSX')]
+                if csv_files:
+                    # Priority check for Dates or Pages
+                    target_file = next((f for f in csv_files if "dates" in f.lower() or "pages" in f.lower()), csv_files[0])
+                    with z.open(target_file) as f:
+                        df_gsc = robust_read_csv(f)
+        else:
+            df_gsc = robust_read_csv(gsc_file)
+            
+        # --- STEP 2: PARSE GA4 COMPARISON FILE ---
+        df_ga = robust_read_csv(ga_file)
 
-        # Calculate Growth Deltas
-        def calc_growth(curr, prev):
-            if prev <= 0: return 0.0
-            return ((curr - prev) / prev) * 100
+        if df_gsc is not None and df_ga is not None:
+            df_gsc.columns = df_gsc.columns.str.strip()
+            df_ga.columns = df_ga.columns.str.strip()
+            
+            # --- EXTRACT METRICS FROM GSC COMPARE FORMAT ---
+            # GSC uses strings like: "Clicks: Last 3 months" vs "Clicks: Previous 3 months"
+            gsc_curr_clicks_col = next((c for c in df_gsc.columns if 'clicks' in c.lower() and ('last' in c.lower() or 'current' in c.lower())), None)
+            gsc_prev_clicks_col = next((c for c in df_gsc.columns if 'clicks' in c.lower() and 'prev' in c.lower()), None)
+            
+            gsc_curr_impr_col = next((c for c in df_gsc.columns if 'impressions' in c.lower() and ('last' in c.lower() or 'current' in c.lower())), None)
+            gsc_prev_impr_col = next((c for c in df_gsc.columns if 'impressions' in c.lower() and 'prev' in c.lower()), None)
 
-        impr_growth = calc_growth(curr_impr, prev_impr)
-        sessions_growth = calc_growth(curr_sessions, prev_sessions)
-        clicks_growth = calc_growth(curr_clicks, prev_clicks)
-        
-        # --- HEALTH SCORING ENGINE ---
-        # Baseline score starts at 70 (neutral performance marker).
-        # Positive growth adds points; negative elements subtract points.
-        score_component_1 = min(max(impr_growth * 0.35, -20), 15)
-        score_component_2 = min(max(sessions_growth * 0.35, -20), 15)
-        score_component_3 = min(max(clicks_growth * 0.30, -20), 10)
-        
-        final_score = int(70 + score_component_1 + score_component_2 + score_component_3)
-        final_score = min(max(final_score, 0), 100) # Lock between 0 and 100
-        
-        # Score Callout Design
-        st.markdown("---")
-        st.subheader("🎯 Overall Project Score Evaluation")
-        
-        score_col1, score_col2 = st.columns([1, 2])
-        
-        with score_col1:
-            if final_score >= 80:
-                st.balloons()
-                st.success(f"## **{final_score} / 100** \n\n 🔥 **Excellent Growth!** Your structural adjustments are driving strong performance metrics.")
-            elif final_score >= 60:
-                st.info(f"## **{final_score} / 100** \n\n 📈 **Steady Progress.** The project is stable with selective positive shifts across key metrics.")
+            # Fallback to standard tracking if they uploaded standard headers
+            curr_clicks = clean_and_sum(df_gsc, gsc_curr_clicks_col) if gsc_curr_clicks_col else clean_and_sum(df_gsc, 'Clicks')
+            prev_clicks = clean_and_sum(df_gsc, gsc_prev_clicks_col) if gsc_prev_clicks_col else 0
+            
+            curr_impr = clean_and_sum(df_gsc, gsc_curr_impr_col) if gsc_curr_impr_col else clean_and_sum(df_gsc, 'Impressions')
+            prev_impr = clean_and_sum(df_gsc, gsc_prev_impr_col) if gsc_prev_impr_col else 0
+
+            # --- EXTRACT METRICS FROM GA4 COMPARE FORMAT ---
+            # GA4 comparison outputs either custom columns or lists blocks with date text identifiers
+            ga_curr_sess_col = next((c for c in df_ga.columns if 'sessions' in c.lower() and ('last' in c.lower() or 'current' in c.lower() or 'active' in c.lower())), None)
+            ga_prev_sess_col = next((c for c in df_ga.columns if 'sessions' in c.lower() and 'prev' in c.lower()), None)
+            
+            if not ga_curr_sess_col: # Fallback to standard positional matching
+                ga_curr_sess_col = next((c for c in df_ga.columns if 'sessions' in c.lower()), None)
+
+            curr_sessions = clean_and_sum(df_ga, ga_curr_sess_col) if ga_curr_sess_col else 0
+            prev_sessions = clean_and_sum(df_ga, ga_prev_sess_col) if ga_prev_sess_col else 0
+
+            # If GA structure put comparison in data rows rather than header columns, parse it:
+            if prev_sessions == 0 and 'date' in df_ga.columns[0].lower():
+                # Attempt structural row grouping breakdown fallback
+                try:
+                    df_ga['Clean_Sess'] = pd.to_numeric(df_ga[ga_curr_sess_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                    halfway = len(df_ga) // 2
+                    curr_sessions = df_ga['Clean_Sess'].iloc[:halfway].sum()
+                    prev_sessions = df_ga['Clean_Sess'].iloc[halfway:].sum()
+                except:
+                    pass
+
+            # --- CALC DELTAS & SCORE ENGINE ---
+            def calc_growth(curr, prev):
+                if prev <= 0: return 0.0
+                return ((curr - prev) / prev) * 100
+
+            impr_growth = calc_growth(curr_impr, prev_impr)
+            sessions_growth = calc_growth(curr_sessions, prev_sessions)
+            clicks_growth = calc_growth(curr_clicks, prev_clicks)
+
+            # Health Grading Calculation Framework
+            # Growth targets inject up to 30 points per core metric index group into baseline score (70)
+            score_comp1 = min(max(impr_growth * 0.35, -20), 15)
+            score_comp2 = min(max(sessions_growth * 0.35, -20), 15)
+            score_comp3 = min(max(clicks_growth * 0.30, -20), 10)
+            
+            # If no historical baseline column was detected in the file, calculate score purely on active presence
+            if prev_impr == 0 and prev_sessions == 0:
+                final_score = 75 if curr_clicks > 0 else 50
+                is_comparison_valid = False
             else:
-                st.warning(f"## **{final_score} / 100** \n\n ⚠️ **Performance Decline.** Action recommended. Primary channels are lagging behind your baseline period.")
-                
-        with score_col2:
-            # Gauge / Summary Bar Chart representation
-            score_data = pd.DataFrame({
-                'Metric Group': ['Visibility (Impr.)', 'Acquisition (Sessions)', 'Conversion (Clicks)'],
-                'Growth Shift %': [impr_growth, sessions_growth, clicks_growth]
-            })
-            fig_score = px.bar(
-                score_data, x='Growth Shift %', y='Metric Group', orientation='h', 
-                text_auto='.1f', color='Growth Shift %',
-                color_continuous_scale=px.colors.diverging.RdYlGn,
-                title="Performance Shifts Between 3-Month Blocks"
-            )
-            st.plotly_chart(fig_score, use_container_width=True)
+                final_score = int(70 + score_comp1 + score_comp2 + score_comp3)
+                final_score = min(max(final_score, 0), 100)
+                is_comparison_valid = True
 
-        st.markdown("---")
-        
-        # --- SIDE BY SIDE PERFORMANCE SHEET ---
-        st.subheader("📊 Primary Key Metric Comparison Table")
-        
-        summary_grid = pd.DataFrame({
-            'Performance Indicator': ['GSC Search Impressions', 'GA Website Sessions', 'GSC Organic Clicks', 'GA Target Conversions'],
-            'Previous 3 Months': [f"{int(prev_impr):,}", f"{int(prev_sessions):,}", f"{int(prev_clicks):,}", f"{int(prev_conv):,}"],
-            'Current 3 Months': [f"{int(curr_impr):,}", f"{int(curr_sessions):,}", f"{int(curr_clicks):,}", f"{int(curr_conv):,}"],
-            'Growth Delta %': [f"{impr_growth:+.2f}%", f"{sessions_growth:+.2f}%", f"{clicks_growth:+.2f}%", f"{calc_growth(curr_conv, prev_conv):+.2f}%"]
-        })
-        st.table(summary_grid)
+            # --- DISPLAY RESULTS INTERFACE ---
+            st.subheader("🎯 Calculated Project Health Score")
+            sc_col1, sc_col2 = st.columns([1, 2])
+            
+            with sc_col1:
+                st.metric("Project Growth Health Score", f"{final_score} / 100")
+                if final_score >= 75:
+                    st.success("🔥 **Doing Great!** The files indicate an upward baseline vector across search signals.")
+                elif final_score >= 60:
+                    st.info("📈 **Maintaining Stability.** Performance remains steady against historical baselines.")
+                else:
+                    st.warning("⚠️ **Decline Vector Detected.** Performance drops visible compared to your past period.")
+            
+            with sc_col2:
+                if is_comparison_valid:
+                    growth_df = pd.DataFrame({
+                        'Core Metrics': ['Search Impressions', 'Website Traffic', 'Organic Clicks'],
+                        'Growth Dynamic %': [impr_growth, sessions_growth, clicks_growth]
+                    })
+                    fig = px.bar(growth_df, x='Growth Dynamic %', y='Core Metrics', orientation='h', 
+                                 text_auto='.1f', color='Growth Dynamic %', 
+                                 color_continuous_scale=px.colors.diverging.RdYlGn)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("ℹ️ Single snapshot detected. For dynamic growth charting, export data using the 'Compare' option in GSC/GA4.")
 
+            # Summary layout matrix grid
+            st.markdown("---")
+            st.subheader("📊 Performance Matrix Breakdown")
+            
+            if is_comparison_valid:
+                summary_data = pd.DataFrame({
+                    'Metric Dimension': ['GSC Search Impressions', 'GA Traffic Sessions', 'GSC Organic Clicks'],
+                    'Previous 3M Period': [f"{int(prev_impr):,}", f"{int(prev_sessions):,}", f"{int(prev_clicks):,}"],
+                    'Current 3M Period': [f"{int(curr_impr):,}", f"{int(curr_sessions):,}", f"{int(curr_clicks):,}"],
+                    'Net Shift Change': [f"{impr_growth:+.1f}%", f"{sessions_growth:+.1f}%", f"{clicks_growth:+.1f}%"]
+                })
+                st.table(summary_data)
+            else:
+                summary_data = pd.DataFrame({
+                    'Metric Dimension': ['GSC Search Impressions', 'GA Traffic Sessions', 'GSC Organic Clicks'],
+                    'Current Volume Summary': [f"{int(curr_impr):,}", f"{int(curr_sessions):,}", f"{int(curr_clicks):,}"]
+                })
+                st.table(summary_data)
+
+        else:
+            st.error("❌ Mismatch detected processing rows. Please recheck your uploaded files format structural validation.")
     except Exception as e:
-        st.error(f"An processing mismatch occurred: {e}")
+        st.error(f"Processing error: {e}. Check if you selected the 'Compare' checkbox parameter inside GSC/GA interface prior to download.")
 else:
-    st.info("💡 **Ready to score your performance?** Please upload your previous 3-Month structural baseline files followed by your current 3-Month tracking data in the sidebar configuration layout.")
+    st.info("💡 **One-Step Dashboard Ready:** Drop your GSC comparison sheet and your GA comparison sheet here to review performance changes instantly.")
