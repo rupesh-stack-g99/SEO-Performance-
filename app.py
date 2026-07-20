@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import zipfile
 import io
+import csv
 
 # Set up the Streamlit page
 st.set_page_config(page_title="GSC & GA Performance Dashboard", layout="wide")
@@ -11,12 +12,12 @@ st.subheader("Compare Google Search Console & Google Analytics Data Automaticall
 
 st.markdown("---")
 
-def smart_read_csv(file_buffer):
+def robust_read_csv(file_buffer):
     """
-    Safely reads CSV files exported from GA/GSC by decoding the stream 
-    and dynamically skipping metadata headers before launching Pandas.
+    Reads a CSV file line-by-line using Python's native csv engine.
+    Filters out metadata blocks at the top and bottom by looking for the 
+    dominant, widest structural table in the file.
     """
-    # Read and decode bytes securely
     content = file_buffer.read()
     if isinstance(content, bytes):
         text_content = content.decode('utf-8', errors='ignore')
@@ -25,17 +26,26 @@ def smart_read_csv(file_buffer):
         
     lines = text_content.splitlines()
     
-    # Trace exactly where the actual data grid starts
-    skip_rows = 0
-    for idx, line in enumerate(lines[:50]): # Scan top 50 rows max
-        # Check for standard GA/GSC table headers
-        if any(keyword in line for keyword in ["Page", "Landing page", "Date", "Clicks", "Sessions", "Impressions"]):
-            skip_rows = idx
-            break
-            
-    # Build clean CSV context starting directly at the data table
-    clean_csv_string = "\n".join(lines[skip_rows:])
-    return pd.read_csv(io.StringIO(clean_csv_string))
+    # Use native csv reader to safely parse rows regardless of varying column counts
+    reader = csv.reader(lines)
+    all_rows = [row for row in reader if row] # filter out completely empty rows
+    
+    if not all_rows:
+        return pd.DataFrame()
+        
+    # Determine the maximum number of columns present in this file
+    max_cols = max(len(row) for row in all_rows)
+    
+    # Extract only the main data table (rows matching the maximum column width)
+    # This automatically discards 1-column header descriptions and 1-column footer notes
+    valid_rows = [row for row in all_rows if len(row) == max_cols]
+    
+    if not valid_rows:
+        return pd.DataFrame()
+        
+    # Create DataFrame using the first wide row as headers
+    df = pd.DataFrame(valid_rows[1:], columns=valid_rows[0])
+    return df
 
 
 # Sidebar for configuration and uploads
@@ -71,59 +81,66 @@ if gsc_zip_file and ga_csv_file:
             
             if matched_gsc_files:
                 with z.open(matched_gsc_files[0]) as f:
-                    df_gsc = smart_read_csv(f)
+                    df_gsc = robust_read_csv(f)
                 st.sidebar.success(f"✅ Loaded GSC '{matched_gsc_files[0]}'")
             else:
                 csv_files = [f for f in file_list if f.endswith('.csv') and not f.startswith('__MACOSX')]
                 if csv_files:
                     with z.open(csv_files[0]) as f:
-                        df_gsc = smart_read_csv(f)
+                        df_gsc = robust_read_csv(f)
                     st.sidebar.warning(f"⚠️ '{gsc_report_type}' not found. Loaded '{csv_files[0]}'.")
                 else:
                     st.error("❌ No CSV files found inside the GSC ZIP archive.")
 
         # --- STEP 2: Process GA CSV File ---
-        df_ga = smart_read_csv(ga_csv_file)
+        df_ga = robust_read_csv(ga_csv_file)
         st.sidebar.success("✅ Loaded GA CSV data (Metadata successfully bypassed!)")
 
         # --- STEP 3: Merge and Analyze ---
-        if df_gsc is not None and df_ga is not None:
+        if df_gsc is not None and not df_gsc.empty and df_ga is not None and not df_ga.empty:
             # Clean column headers
             df_gsc.columns = df_gsc.columns.str.strip()
             df_ga.columns = df_ga.columns.str.strip()
             
-            # Auto-align common variant naming schemas for convenience
+            # Auto-align variations of Google Analytics "Landing Page" to match GSC's "Page"
             if join_column == "Page":
                 if "Landing page" in df_ga.columns and "Page" not in df_ga.columns:
                     df_ga.rename(columns={"Landing page": "Page"}, inplace=True)
                 elif "Landing page + query string" in df_ga.columns and "Page" not in df_ga.columns:
                     df_ga.rename(columns={"Landing page + query string": "Page"}, inplace=True)
 
-            # Sanitize numeric columns
+            # Sanitize numeric columns and convert strings to floats/ints safely
+            metrics = ['Clicks', 'Impressions', 'Sessions', 'Conversions', 'Total users', 'Views']
             for df in [df_gsc, df_ga]:
                 for col in df.columns:
-                    if col in ['Clicks', 'Impressions', 'Sessions', 'Conversions', 'Total users']:
-                        if df[col].dtype == 'object':
-                            df[col] = df[col].astype(str).str.replace(',', '').str.replace('%', '')
-                            df[col] = pd.to_numeric(df[col], errors='coerce')
-                        df[col] = df[col].fillna(0)
+                    if any(m.lower() in col.lower() for m in metrics):
+                        df[col] = df[col].astype(str).str.replace(',', '').str.replace('%', '')
+                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
             if join_column in df_gsc.columns and join_column in df_ga.columns:
                 merged_df = pd.merge(df_gsc, df_ga, on=join_column, how="inner")
                 
                 if merged_df.empty:
-                    st.warning(f"⚠️ Merge generated 0 matched elements. Verify column keys. GSC keys: {list(df_gsc.columns)} | GA keys: {list(df_ga.columns)}")
+                    st.warning(f"⚠️ Merge generated 0 matched rows. Verify column formats match. GSC keys: {list(df_gsc.columns)} | GA keys: {list(df_ga.columns)}")
                 else:
-                    st.success("🎉 GSC and GA matrices synchronized!")
+                    st.success("🎉 Data matrices successfully synchronized!")
                     
                     # --- KPI METRICS ---
                     st.subheader("📊 Quick 3-Month Summary")
                     col1, col2, col3, col4 = st.columns(4)
                     
-                    clicks = merged_df.get('Clicks', pd.Series([0])).sum()
-                    impressions = merged_df.get('Impressions', pd.Series([0])).sum()
-                    sessions = merged_df.get('Sessions', pd.Series([0])).sum()
-                    conversions = merged_df.get('Conversions', merged_df.get('Transactions', pd.Series([0]))).sum()
+                    # Flexible lookup for variations in naming conventions
+                    def get_metric_sum(df, target_names):
+                        for name in target_names:
+                            matched_col = [c for c in df.columns if name.lower() in c.lower()]
+                            if matched_col:
+                                return df[matched_col[0]].sum()
+                        return 0
+
+                    clicks = get_metric_sum(merged_df, ['clicks'])
+                    impressions = get_metric_sum(merged_df, ['impressions'])
+                    sessions = get_metric_sum(merged_df, ['sessions', 'visits'])
+                    conversions = get_metric_sum(merged_df, ['conversions', 'transactions', 'conversions'])
                     
                     col1.metric("Total GSC Clicks", f"{int(clicks):,}")
                     col2.metric("Total GSC Impressions", f"{int(impressions):,}")
@@ -135,31 +152,38 @@ if gsc_zip_file and ga_csv_file:
                     # --- INTERACTIVE CHARTS ---
                     st.subheader("📉 Performance Visualization")
                     
-                    if 'Clicks' in merged_df.columns and 'Sessions' in merged_df.columns:
+                    # Find mapped metric names to plot
+                    x_col = [c for c in merged_df.columns if 'clicks' in c.lower()]
+                    y_col = [c for c in merged_df.columns if 'sessions' in c.lower()]
+                    
+                    if x_col and y_col:
                         fig1 = px.scatter(
                             merged_df, 
-                            x='Clicks', 
-                            y='Sessions', 
+                            x=x_col[0], 
+                            y=y_col[0], 
                             hover_name=join_column,
-                            title="Correlation: GSC Search Clicks vs GA Sessions",
+                            title=f"Correlation: {x_col[0]} vs {y_col[0]}",
                             trendline="ols"
                         )
                         st.plotly_chart(fig1, use_container_width=True)
                     
                     st.subheader(f"🏆 Top Performing Items by {join_column}")
-                    available_metrics = [c for c in ['Clicks', 'Impressions', 'Sessions', 'Conversions'] if c in merged_df.columns]
-                    metric_to_plot = st.selectbox("Select metric to rank by:", available_metrics)
                     
-                    top_data = merged_df.sort_values(by=metric_to_plot, ascending=False).head(15)
-                    fig2 = px.bar(
-                        top_data, 
-                        x=join_column, 
-                        y=metric_to_plot, 
-                        title=f"Top 15 items by {metric_to_plot}",
-                        color=metric_to_plot,
-                        text_auto=True
-                    )
-                    st.plotly_chart(fig2, use_container_width=True)
+                    # Select numeric columns for user ranking
+                    numeric_cols = merged_df.select_dtypes(include=['number']).columns.tolist()
+                    if numeric_cols:
+                        metric_to_plot = st.selectbox("Select metric to rank by:", numeric_cols)
+                        
+                        top_data = merged_df.sort_values(by=metric_to_plot, ascending=False).head(15)
+                        fig2 = px.bar(
+                            top_data, 
+                            x=join_column, 
+                            y=metric_to_plot, 
+                            title=f"Top 15 items by {metric_to_plot}",
+                            color=metric_to_plot,
+                            text_auto=True
+                        )
+                        st.plotly_chart(fig2, use_container_width=True)
                     
                     # --- DATA TABLE ---
                     st.subheader("📋 Combined GSC + GA Dataset")
@@ -174,9 +198,11 @@ if gsc_zip_file and ga_csv_file:
                     )
             else:
                 st.error(f"❌ Key Parameter Match Failure: Missing column '{join_column}' in datasets.")
-                st.write("**GSC Data Headers:**", list(df_gsc.columns))
-                st.write("**GA Data Headers:**", list(df_ga.columns))
-
+                st.write("**GSC Headers:**", list(df_gsc.columns))
+                st.write("**GA Headers:**", list(df_ga.columns))
+        else:
+            st.error("❌ Failed to parse data. One or both tables are empty after cleaning metadata rows.")
+            
     except Exception as e:
         st.error(f"An unexpected error occurred while parsing the data: {e}")
 else:
