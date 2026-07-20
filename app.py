@@ -93,7 +93,7 @@ if gsc_zip_file and ga_csv_file:
 
         # --- STEP 2: Process GA CSV File ---
         df_ga = robust_read_csv(ga_csv_file)
-        st.sidebar.success("✅ Loaded GA CSV data (Metadata successfully bypassed!)")
+        st.sidebar.success("✅ Loaded GA CSV data")
 
         # --- STEP 3: Merge and Analyze ---
         if df_gsc is not None and not df_gsc.empty and df_ga is not None and not df_ga.empty:
@@ -101,41 +101,42 @@ if gsc_zip_file and ga_csv_file:
             df_gsc.columns = df_gsc.columns.str.strip()
             df_ga.columns = df_ga.columns.str.strip()
             
-            # --- INTELLIGENT KEY MAPPING (CASE INSENSITIVE & ALIAS MATCHING) ---
-            target_key = user_join_column.strip().lower()
+            # --- AGGRESSIVE FUZZY KEY SEARCH ---
             gsc_matched_col = None
             ga_matched_col = None
             
-            # Look for suitable matching column in GSC
+            target_mode = user_join_column.strip().lower()
+
+            # 1. Search for GSC Key
+            # Standard GSC pages column is named 'Top pages' or 'Page'
+            if target_mode == "page":
+                gsc_possibilities = ['page', 'top pages', 'url', 'landing page']
+            else: # Date mode
+                gsc_possibilities = ['date', 'day', 'time']
+
             for col in df_gsc.columns:
-                if col.lower() == target_key:
+                if col.lower() in gsc_possibilities or any(p in col.lower() for p in gsc_possibilities):
                     gsc_matched_col = col
                     break
-                    
-            # Look for suitable matching column in GA (with explicit structural fallbacks)
+
+            # 2. Search for GA Key
+            # Standard GA4 columns are named 'Landing page', 'Landing page + query string', 'Page path and screen class'
+            if target_mode == "page":
+                ga_possibilities = ['landing page', 'page path', 'page', 'url', 'screen class', 'query string']
+            else: # Date mode
+                ga_possibilities = ['date', 'day', 'nth day', 'year month']
+
             for col in df_ga.columns:
-                if col.lower() == target_key:
+                if col.lower() in ga_possibilities or any(p in col.lower() for p in ga_possibilities):
                     ga_matched_col = col
                     break
-            
-            # Fallbacks if exact name match wasn't found due to different tool configurations
-            if not ga_matched_col and target_key == "page":
-                for col in df_ga.columns:
-                    if "landing page" in col.lower() or "page path" in col.lower():
-                        ga_matched_col = col
-                        break
-            if not ga_matched_col and target_key == "date":
-                for col in df_ga.columns:
-                    if "date" in col.lower() or "day" in col.lower():
-                        ga_matched_col = col
-                        break
 
-            # If match elements are mapped, force them to align names perfectly for the merge step
+            # --- RENAME AND SYNC ---
             if gsc_matched_col and ga_matched_col:
                 df_gsc.rename(columns={gsc_matched_col: user_join_column}, inplace=True)
                 df_ga.rename(columns={ga_matched_col: user_join_column}, inplace=True)
                 
-                # Sanitize numeric columns and convert strings to numbers
+                # Sanitize numeric metrics
                 metrics = ['clicks', 'impressions', 'sessions', 'conversions', 'users', 'views', 'ctr']
                 for df in [df_gsc, df_ga]:
                     for col in df.columns:
@@ -143,13 +144,13 @@ if gsc_zip_file and ga_csv_file:
                             df[col] = df[col].astype(str).str.replace(',', '').str.replace('%', '')
                             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-                # Execute structural merge
+                # Merge the verified tables
                 merged_df = pd.merge(df_gsc, df_ga, on=user_join_column, how="inner")
                 
                 if merged_df.empty:
-                    st.warning(f"⚠️ Merge generated 0 rows. Check if data format matches. (e.g., GSC date format '2026-03-01' vs GA format '20260301').")
-                    st.write("**Sample GSC Data:**", df_gsc.head(3))
-                    st.write("**Sample GA Data:**", df_ga.head(3))
+                    st.warning(f"⚠️ Column match found, but 0 matching items line up! Make sure the data formats match exactly (e.g., GSC has full URLs like `https://site.com/page` while GA has relative paths like `/page`).")
+                    st.write("**Sample GSC Data:**", df_gsc[[user_join_column]].head(3))
+                    st.write("**Sample GA Data:**", df_ga[[user_join_column]].head(3))
                 else:
                     st.success("🎉 GSC and GA matrices successfully synchronized!")
                     
@@ -222,7 +223,7 @@ if gsc_zip_file and ga_csv_file:
                         mime="text/csv"
                     )
             else:
-                st.error(f"❌ Key Parameter Match Failure: Could not find any column matching '{user_join_column}' (case-insensitive).")
+                st.error(f"❌ Structural Match Failure: Could not auto-detect the matching column for '{user_join_column}'.")
                 st.write("**Detected GSC Headers:**", list(df_gsc.columns))
                 st.write("**Detected GA Headers:**", list(df_ga.columns))
         else:
