@@ -37,7 +37,6 @@ def robust_read_csv(file_buffer):
     max_cols = max(len(row) for row in all_rows)
     
     # Extract only the main data table (rows matching the maximum column width)
-    # This automatically discards 1-column header descriptions and 1-column footer notes
     valid_rows = [row for row in all_rows if len(row) == max_cols]
     
     if not valid_rows:
@@ -64,7 +63,7 @@ gsc_report_type = st.sidebar.selectbox(
 ga_csv_file = st.sidebar.file_uploader("2. Upload GA Data (CSV file)", type=["csv"])
 
 st.sidebar.header("⚙️ Matching Configuration")
-join_column = st.sidebar.text_input(
+user_join_column = st.sidebar.text_input(
     "Common Column to Match On", 
     value="Page" if "Pages" in gsc_report_type else "Date"
 )
@@ -98,38 +97,66 @@ if gsc_zip_file and ga_csv_file:
 
         # --- STEP 3: Merge and Analyze ---
         if df_gsc is not None and not df_gsc.empty and df_ga is not None and not df_ga.empty:
-            # Clean column headers
+            # Clean column headers (strip whitespaces)
             df_gsc.columns = df_gsc.columns.str.strip()
             df_ga.columns = df_ga.columns.str.strip()
             
-            # Auto-align variations of Google Analytics "Landing Page" to match GSC's "Page"
-            if join_column == "Page":
-                if "Landing page" in df_ga.columns and "Page" not in df_ga.columns:
-                    df_ga.rename(columns={"Landing page": "Page"}, inplace=True)
-                elif "Landing page + query string" in df_ga.columns and "Page" not in df_ga.columns:
-                    df_ga.rename(columns={"Landing page + query string": "Page"}, inplace=True)
+            # --- INTELLIGENT KEY MAPPING (CASE INSENSITIVE & ALIAS MATCHING) ---
+            target_key = user_join_column.strip().lower()
+            gsc_matched_col = None
+            ga_matched_col = None
+            
+            # Look for suitable matching column in GSC
+            for col in df_gsc.columns:
+                if col.lower() == target_key:
+                    gsc_matched_col = col
+                    break
+                    
+            # Look for suitable matching column in GA (with explicit structural fallbacks)
+            for col in df_ga.columns:
+                if col.lower() == target_key:
+                    ga_matched_col = col
+                    break
+            
+            # Fallbacks if exact name match wasn't found due to different tool configurations
+            if not ga_matched_col and target_key == "page":
+                for col in df_ga.columns:
+                    if "landing page" in col.lower() or "page path" in col.lower():
+                        ga_matched_col = col
+                        break
+            if not ga_matched_col and target_key == "date":
+                for col in df_ga.columns:
+                    if "date" in col.lower() or "day" in col.lower():
+                        ga_matched_col = col
+                        break
 
-            # Sanitize numeric columns and convert strings to floats/ints safely
-            metrics = ['Clicks', 'Impressions', 'Sessions', 'Conversions', 'Total users', 'Views']
-            for df in [df_gsc, df_ga]:
-                for col in df.columns:
-                    if any(m.lower() in col.lower() for m in metrics):
-                        df[col] = df[col].astype(str).str.replace(',', '').str.replace('%', '')
-                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            # If match elements are mapped, force them to align names perfectly for the merge step
+            if gsc_matched_col and ga_matched_col:
+                df_gsc.rename(columns={gsc_matched_col: user_join_column}, inplace=True)
+                df_ga.rename(columns={ga_matched_col: user_join_column}, inplace=True)
+                
+                # Sanitize numeric columns and convert strings to numbers
+                metrics = ['clicks', 'impressions', 'sessions', 'conversions', 'users', 'views', 'ctr']
+                for df in [df_gsc, df_ga]:
+                    for col in df.columns:
+                        if any(m in col.lower() for m in metrics):
+                            df[col] = df[col].astype(str).str.replace(',', '').str.replace('%', '')
+                            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-            if join_column in df_gsc.columns and join_column in df_ga.columns:
-                merged_df = pd.merge(df_gsc, df_ga, on=join_column, how="inner")
+                # Execute structural merge
+                merged_df = pd.merge(df_gsc, df_ga, on=user_join_column, how="inner")
                 
                 if merged_df.empty:
-                    st.warning(f"⚠️ Merge generated 0 matched rows. Verify column formats match. GSC keys: {list(df_gsc.columns)} | GA keys: {list(df_ga.columns)}")
+                    st.warning(f"⚠️ Merge generated 0 rows. Check if data format matches. (e.g., GSC date format '2026-03-01' vs GA format '20260301').")
+                    st.write("**Sample GSC Data:**", df_gsc.head(3))
+                    st.write("**Sample GA Data:**", df_ga.head(3))
                 else:
-                    st.success("🎉 Data matrices successfully synchronized!")
+                    st.success("🎉 GSC and GA matrices successfully synchronized!")
                     
                     # --- KPI METRICS ---
                     st.subheader("📊 Quick 3-Month Summary")
                     col1, col2, col3, col4 = st.columns(4)
                     
-                    # Flexible lookup for variations in naming conventions
                     def get_metric_sum(df, target_names):
                         for name in target_names:
                             matched_col = [c for c in df.columns if name.lower() in c.lower()]
@@ -140,7 +167,7 @@ if gsc_zip_file and ga_csv_file:
                     clicks = get_metric_sum(merged_df, ['clicks'])
                     impressions = get_metric_sum(merged_df, ['impressions'])
                     sessions = get_metric_sum(merged_df, ['sessions', 'visits'])
-                    conversions = get_metric_sum(merged_df, ['conversions', 'transactions', 'conversions'])
+                    conversions = get_metric_sum(merged_df, ['conversions', 'transactions'])
                     
                     col1.metric("Total GSC Clicks", f"{int(clicks):,}")
                     col2.metric("Total GSC Impressions", f"{int(impressions):,}")
@@ -152,7 +179,6 @@ if gsc_zip_file and ga_csv_file:
                     # --- INTERACTIVE CHARTS ---
                     st.subheader("📉 Performance Visualization")
                     
-                    # Find mapped metric names to plot
                     x_col = [c for c in merged_df.columns if 'clicks' in c.lower()]
                     y_col = [c for c in merged_df.columns if 'sessions' in c.lower()]
                     
@@ -161,15 +187,14 @@ if gsc_zip_file and ga_csv_file:
                             merged_df, 
                             x=x_col[0], 
                             y=y_col[0], 
-                            hover_name=join_column,
+                            hover_name=user_join_column,
                             title=f"Correlation: {x_col[0]} vs {y_col[0]}",
                             trendline="ols"
                         )
                         st.plotly_chart(fig1, use_container_width=True)
                     
-                    st.subheader(f"🏆 Top Performing Items by {join_column}")
+                    st.subheader(f"🏆 Top Performing Items by {user_join_column}")
                     
-                    # Select numeric columns for user ranking
                     numeric_cols = merged_df.select_dtypes(include=['number']).columns.tolist()
                     if numeric_cols:
                         metric_to_plot = st.selectbox("Select metric to rank by:", numeric_cols)
@@ -177,7 +202,7 @@ if gsc_zip_file and ga_csv_file:
                         top_data = merged_df.sort_values(by=metric_to_plot, ascending=False).head(15)
                         fig2 = px.bar(
                             top_data, 
-                            x=join_column, 
+                            x=user_join_column, 
                             y=metric_to_plot, 
                             title=f"Top 15 items by {metric_to_plot}",
                             color=metric_to_plot,
@@ -197,11 +222,11 @@ if gsc_zip_file and ga_csv_file:
                         mime="text/csv"
                     )
             else:
-                st.error(f"❌ Key Parameter Match Failure: Missing column '{join_column}' in datasets.")
-                st.write("**GSC Headers:**", list(df_gsc.columns))
-                st.write("**GA Headers:**", list(df_ga.columns))
+                st.error(f"❌ Key Parameter Match Failure: Could not find any column matching '{user_join_column}' (case-insensitive).")
+                st.write("**Detected GSC Headers:**", list(df_gsc.columns))
+                st.write("**Detected GA Headers:**", list(df_ga.columns))
         else:
-            st.error("❌ Failed to parse data. One or both tables are empty after cleaning metadata rows.")
+            st.error("❌ Failed to parse data. One or both tables are empty after data normalization steps.")
             
     except Exception as e:
         st.error(f"An unexpected error occurred while parsing the data: {e}")
