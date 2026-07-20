@@ -6,9 +6,9 @@ import io
 import csv
 
 # Set up the Streamlit page
-st.set_page_config(page_title="Website Performance Dashboard", layout="wide")
-st.title("📈 3-Month Performance Trend Dashboard")
-st.subheader("Evaluate growth trends to see if performance is getting better or worse")
+st.set_page_config(page_title="Overall Project Score Dashboard", layout="wide")
+st.title("🏆 Website Performance & Project Health Dashboard")
+st.subheader("Compare the Last 3 Months against the Current 3 Months to calculate an Overall Health Score")
 
 st.markdown("---")
 
@@ -36,175 +36,131 @@ def robust_read_csv(file_buffer):
     df = pd.DataFrame(valid_rows[1:], columns=valid_rows[0])
     return df
 
-def try_parse_dates_and_add_month(df):
-    """Attempts to find a date column and create a structural 'Month' column."""
-    for col in df.columns:
-        if 'date' in col.lower() or 'day' in col.lower():
-            try:
-                # Parse to datetime
-                parsed_dates = pd.to_datetime(df[col], errors='coerce')
-                if not parsed_dates.isna().all():
-                    df['Month'] = parsed_dates.dt.strftime('%Y-%m (Month %b)')
-                    return df, True
-            except:
-                pass
-    return df, False
+def get_metric_sum(df, target_names):
+    """Safely extracts the total sum of a dynamic metric from a dataframe."""
+    for name in target_names:
+        matched_col = [c for c in df.columns if name.lower() in c.lower()]
+        if matched_col:
+            # Clean values
+            series = df[matched_col[0]].astype(str).str.replace(',', '').str.replace('%', '')
+            return pd.to_numeric(series, errors='coerce').fillna(0).sum()
+    return 0
 
-def display_trend_metrics(df, metric_list):
-    """Calculates MoM percentage shifts and renders dynamic delta cards."""
-    months = sorted(df['Month'].unique())
-    if len(months) < 2:
-        st.warning("⚠️ Need at least 2 distinct months of data to compute performance shifts.")
-        return
-        
-    st.markdown(f"### 🗓️ Comparing Months: **{', '.join(months)}**")
-    
-    # Pivot matrix to calculate summaries per month
-    monthly_summary = df.groupby('Month')[metric_list].sum().reset_index()
-    
-    cols = st.columns(len(metric_list))
-    for idx, metric in enumerate(metric_list):
-        with cols[idx]:
-            # Get values for latest and previous month
-            latest_val = monthly_summary.iloc[-1][metric]
-            prev_val = monthly_summary.iloc[-2][metric]
-            
-            # Calculate absolute percentage swing
-            if prev_val > 0:
-                change_pct = ((latest_val - prev_val) / prev_val) * 100
-                delta_str = f"{change_pct:+.1f}% vs Last Month"
-            else:
-                delta_str = "New Data"
-                change_pct = 0
-                
-            # Determine status label
-            status = "🟢 Improving" if change_pct >= 0 else "🔴 Declining"
-            
-            st.metric(
-                label=f"{metric} ({status})", 
-                value=f"{int(latest_val):,}", 
-                delta=delta_str
-            )
-            
-    # Draw Trend Line Plot
-    fig = px.line(
-        monthly_summary, 
-        x='Month', 
-        y=metric_list, 
-        markers=True, 
-        title="Performance Trajectory Over Last 3 Months"
-    )
-    st.plotly_chart(fig, use_container_width=True)
+# Sidebar configuration
+st.sidebar.header("📁 Step 1: Upload Baseline (Previous 3 Months)")
+gsc_zip_prev = st.sidebar.file_uploader("GSC Previous 3M (ZIP)", type=["zip"], key="gsc_prev")
+ga_csv_prev = st.sidebar.file_uploader("GA Previous 3M (CSV)", type=["csv"], key="ga_prev")
 
-# Sidebar for file uploads
-st.sidebar.header("📁 Upload Data Files")
+st.sidebar.markdown("---")
 
-# 1. GSC Zip Upload
-gsc_zip_file = st.sidebar.file_uploader("1. Upload GSC Data (ZIP file)", type=["zip"])
+st.sidebar.header("📁 Step 2: Upload Current (Recent 3 Months)")
+gsc_zip_curr = st.sidebar.file_uploader("GSC Current 3M (ZIP)", type=["zip"], key="gsc_curr")
+ga_csv_curr = st.sidebar.file_uploader("GA Current 3M (CSV)", type=["csv"], key="ga_curr")
+
+st.sidebar.markdown("---")
 gsc_report_type = st.sidebar.selectbox(
-    "Select GSC Report Type inside ZIP to display:",
-    ["Dates.csv", "Pages.csv", "Queries.csv", "Countries.csv"],
+    "Internal GSC File Name Target:",
+    ["Pages.csv", "Dates.csv", "Queries.csv"],
     index=0
 )
 
-# 2. GA CSV Upload
-ga_csv_file = st.sidebar.file_uploader("2. Upload GA Data (CSV file)", type=["csv"])
+def extract_gsc_df(zip_file, report_name):
+    if zip_file is None: return None
+    with zipfile.ZipFile(zip_file) as z:
+        file_list = z.namelist()
+        matched = [f for f in file_list if report_name.lower() in f.lower()]
+        if matched:
+            with z.open(matched[0]) as f: return robust_read_csv(f)
+        else:
+            csv_files = [f for f in file_list if f.endswith('.csv') and not f.startswith('__MACOSX')]
+            if csv_files:
+                with z.open(csv_files[0]) as f: return robust_read_csv(f)
+    return None
 
-# Optional manual month override if they upload single fixed total snapshot sheets
-st.sidebar.markdown("---")
-st.sidebar.header("🗓️ Manual Grouping Option")
-st.sidebar.caption("If your files don't contain individual dates, use this selection to manually assign a month label to the uploaded file.")
-manual_month_label = st.sidebar.text_input("Assign Month Label (e.g. 'Last Month', '2 Months Ago')", value="Current Period")
+# Check readiness
+if gsc_zip_prev and ga_csv_prev and gsc_zip_curr and ga_csv_curr:
+    try:
+        # Load all 4 data frames
+        df_gsc_prev = extract_gsc_df(gsc_zip_prev, gsc_report_type)
+        df_gsc_curr = extract_gsc_df(gsc_zip_curr, gsc_report_type)
+        df_ga_prev = robust_read_csv(ga_csv_prev)
+        df_ga_curr = robust_read_csv(ga_csv_curr)
+        
+        # Aggregate Primary Metrics
+        prev_clicks = get_metric_sum(df_gsc_prev, ['clicks'])
+        curr_clicks = get_metric_sum(df_gsc_curr, ['clicks'])
+        
+        prev_impr = get_metric_sum(df_gsc_prev, ['impressions'])
+        curr_impr = get_metric_sum(df_gsc_curr, ['impressions'])
+        
+        prev_sessions = get_metric_sum(df_ga_prev, ['sessions', 'visits'])
+        curr_sessions = get_metric_sum(df_ga_curr, ['sessions', 'visits'])
+        
+        prev_conv = get_metric_sum(df_ga_prev, ['conversions', 'transactions'])
+        curr_conv = get_metric_sum(df_ga_curr, ['conversions', 'transactions'])
 
-df_gsc = None
-df_ga = None
+        # Calculate Growth Deltas
+        def calc_growth(curr, prev):
+            if prev <= 0: return 0.0
+            return ((curr - prev) / prev) * 100
 
-if gsc_zip_file or ga_csv_file:
-    tab1, tab2 = st.tabs(["🔍 Search Console Growth Trend", "📊 Google Analytics Growth Trend"])
-    
-    # ----------------------------------------------------
-    # TAB 1: GOOGLE SEARCH CONSOLE TRENDS
-    # ----------------------------------------------------
-    with tab1:
-        if gsc_zip_file:
-            try:
-                with zipfile.ZipFile(gsc_zip_file) as z:
-                    file_list = z.namelist()
-                    matched_gsc_files = [f for f in file_list if gsc_report_type.lower() in f.lower()]
-                    
-                    if matched_gsc_files:
-                        with z.open(matched_gsc_files[0]) as f:
-                            df_gsc = robust_read_csv(f)
-                    else:
-                        csv_files = [f for f in file_list if f.endswith('.csv') and not f.startswith('__MACOSX')]
-                        if csv_files:
-                            with z.open(csv_files[0]) as f:
-                                df_gsc = robust_read_csv(f)
+        impr_growth = calc_growth(curr_impr, prev_impr)
+        sessions_growth = calc_growth(curr_sessions, prev_sessions)
+        clicks_growth = calc_growth(curr_clicks, prev_clicks)
+        
+        # --- HEALTH SCORING ENGINE ---
+        # Baseline score starts at 70 (neutral performance marker).
+        # Positive growth adds points; negative elements subtract points.
+        score_component_1 = min(max(impr_growth * 0.35, -20), 15)
+        score_component_2 = min(max(sessions_growth * 0.35, -20), 15)
+        score_component_3 = min(max(clicks_growth * 0.30, -20), 10)
+        
+        final_score = int(70 + score_component_1 + score_component_2 + score_component_3)
+        final_score = min(max(final_score, 0), 100) # Lock between 0 and 100
+        
+        # Score Callout Design
+        st.markdown("---")
+        st.subheader("🎯 Overall Project Score Evaluation")
+        
+        score_col1, score_col2 = st.columns([1, 2])
+        
+        with score_col1:
+            if final_score >= 80:
+                st.balloons()
+                st.success(f"## **{final_score} / 100** \n\n 🔥 **Excellent Growth!** Your structural adjustments are driving strong performance metrics.")
+            elif final_score >= 60:
+                st.info(f"## **{final_score} / 100** \n\n 📈 **Steady Progress.** The project is stable with selective positive shifts across key metrics.")
+            else:
+                st.warning(f"## **{final_score} / 100** \n\n ⚠️ **Performance Decline.** Action recommended. Primary channels are lagging behind your baseline period.")
                 
-                if df_gsc is not None and not df_gsc.empty:
-                    df_gsc.columns = df_gsc.columns.str.strip()
-                    
-                    # Clean numeric metrics
-                    for col in ['Clicks', 'Impressions', 'CTR', 'Position']:
-                        if col in df_gsc.columns:
-                            df_gsc[col] = df_gsc[col].astype(str).str.replace(',', '').str.replace('%', '')
-                            df_gsc[col] = pd.to_numeric(df_gsc[col], errors='coerce').fillna(0)
-                    
-                    # Detect or assign time parameters
-                    df_gsc, has_time = try_parse_dates_and_add_month(df_gsc)
-                    if not has_time:
-                        df_gsc['Month'] = manual_month_label
-                        
-                    st.subheader("📈 Search Console Directional Review")
-                    available_gsc_metrics = [c for c in ['Clicks', 'Impressions'] if c in df_gsc.columns]
-                    
-                    if 'Month' in df_gsc.columns and len(df_gsc['Month'].unique()) >= 2:
-                        display_trend_metrics(df_gsc, available_gsc_metrics)
-                    else:
-                        st.info("💡 The current GSC file shows a single historical block. To track month-over-month performance trends, ensure you select **'Dates.csv'** from the report selection box, or update your source export to include a daily timeline breakdown.")
-                        
-                    st.subheader("📋 Raw Data Output")
-                    st.dataframe(df_gsc, use_container_width=True)
-            except Exception as e:
-                st.error(f"Error reading GSC ZIP file: {e}")
-        else:
-            st.info("Upload GSC ZIP file to populate data panel.")
+        with score_col2:
+            # Gauge / Summary Bar Chart representation
+            score_data = pd.DataFrame({
+                'Metric Group': ['Visibility (Impr.)', 'Acquisition (Sessions)', 'Conversion (Clicks)'],
+                'Growth Shift %': [impr_growth, sessions_growth, clicks_growth]
+            })
+            fig_score = px.bar(
+                score_data, x='Growth Shift %', y='Metric Group', orientation='h', 
+                text_auto='.1f', color='Growth Shift %',
+                color_continuous_scale=px.colors.diverging.RdYlGn,
+                title="Performance Shifts Between 3-Month Blocks"
+            )
+            st.plotly_chart(fig_score, use_container_width=True)
 
-    # ----------------------------------------------------
-    # TAB 2: GOOGLE ANALYTICS TRENDS
-    # ----------------------------------------------------
-    with tab2:
-        if ga_csv_file:
-            try:
-                df_ga = robust_read_csv(ga_csv_file)
-                if df_ga is not None and not df_ga.empty:
-                    df_ga.columns = df_ga.columns.str.strip()
-                    
-                    # Clean numeric elements
-                    metrics = ['sessions', 'conversions', 'users', 'views']
-                    for col in df_ga.columns:
-                        if any(m in col.lower() for m in metrics):
-                            df_ga[col] = df_ga[col].astype(str).str.replace(',', '').str.replace('%', '')
-                            df_ga[col] = pd.to_numeric(df_ga[col], errors='coerce').fillna(0)
-                    
-                    # Detect or assign time parameters
-                    df_ga, has_time = try_parse_dates_and_add_month(df_ga)
-                    if not has_time:
-                        df_ga['Month'] = manual_month_label
-                        
-                    st.subheader("📈 Analytics Traffic Directional Review")
-                    numeric_cols = df_ga.select_dtypes(include=['number']).columns.tolist()
-                    
-                    if 'Month' in df_ga.columns and len(df_ga['Month'].unique()) >= 2 and numeric_cols:
-                        display_trend_metrics(df_ga, numeric_cols[:3])
-                    else:
-                        st.info("💡 Tracking trajectories over time requires a sequential format. Export your Google Analytics report grouped by **'Date'** rather than just a total page count overview to populate the automatic growth trajectory chart.")
-                        
-                    st.subheader("📋 Raw Data Output")
-                    st.dataframe(df_ga, use_container_width=True)
-            except Exception as e:
-                st.error(f"Error reading GA CSV file: {e}")
-        else:
-            st.info("Upload GA CSV file to populate data panel.")
+        st.markdown("---")
+        
+        # --- SIDE BY SIDE PERFORMANCE SHEET ---
+        st.subheader("📊 Primary Key Metric Comparison Table")
+        
+        summary_grid = pd.DataFrame({
+            'Performance Indicator': ['GSC Search Impressions', 'GA Website Sessions', 'GSC Organic Clicks', 'GA Target Conversions'],
+            'Previous 3 Months': [f"{int(prev_impr):,}", f"{int(prev_sessions):,}", f"{int(prev_clicks):,}", f"{int(prev_conv):,}"],
+            'Current 3 Months': [f"{int(curr_impr):,}", f"{int(curr_sessions):,}", f"{int(curr_clicks):,}", f"{int(curr_conv):,}"],
+            'Growth Delta %': [f"{impr_growth:+.2f}%", f"{sessions_growth:+.2f}%", f"{clicks_growth:+.2f}%", f"{calc_growth(curr_conv, prev_conv):+.2f}%"]
+        })
+        st.table(summary_grid)
+
+    except Exception as e:
+        st.error(f"An processing mismatch occurred: {e}")
 else:
-    st.info("💡 Upload your historical metrics in the sidebar to populate the dynamic growth trend analytics engine.")
+    st.info("💡 **Ready to score your performance?** Please upload your previous 3-Month structural baseline files followed by your current 3-Month tracking data in the sidebar configuration layout.")
